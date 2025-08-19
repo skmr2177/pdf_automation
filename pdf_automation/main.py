@@ -8,13 +8,13 @@ from .render import render_pdf_from_html, rewrite_links_to_local_pdfs
 from .utils import compute_file_uri
 
 
-def build(start_url: str, output_root: str, same_origin_only: bool = True, max_pages: int | None = None) -> None:
+def build(start_url: str, output_root: str, same_origin_only: bool = True, max_pages: int | None = None, allowed_prefix: str | None = None) -> None:
 	"""Crawl, rewrite links to local PDFs, and render each page to a PDF."""
 	manifest_path = os.path.join(output_root, "manifest.json")
 	os.makedirs(output_root, exist_ok=True)
 
 	# Crawl
-	crawler = SiteCrawler(start_url=start_url, same_origin_only=same_origin_only, max_pages=max_pages)
+	crawler = SiteCrawler(start_url=start_url, same_origin_only=same_origin_only, max_pages=max_pages, allowed_prefix=allowed_prefix)
 	html_by_url, url_to_pdf_rel = crawler.crawl()
 
 	# Persist manifest for re-use
@@ -35,9 +35,10 @@ def main() -> None:
 	parser.add_argument("--out", dest="output_root", default="out", help="Output directory root (default: out)")
 	parser.add_argument("--all-origins", dest="same_origin_only", action="store_false", help="Allow off-origin links (default: same-origin only)")
 	parser.add_argument("--max-pages", dest="max_pages", type=int, default=None, help="Limit number of pages to crawl")
+	parser.add_argument("--allowed-prefix", dest="allowed_prefix", default=None, help="Only include pages whose final URL starts with this prefix")
 	args = parser.parse_args()
 
-	build(start_url=args.start_url, output_root=args.output_root, same_origin_only=args.same_origin_only, max_pages=args.max_pages)
+	build(start_url=args.start_url, output_root=args.output_root, same_origin_only=args.same_origin_only, max_pages=args.max_pages, allowed_prefix=args.allowed_prefix)
 
 
 if __name__ == "__main__":
