@@ -133,6 +133,12 @@ async def render_urls_to_pdf(urls: Iterable[str], output_root: str, allowed_pref
     output_root_path = Path(output_root)
     url_to_pdf: Dict[str, str] = {}
     chrome = _find_chrome_binary()
+    weasyprint = None
+    try:
+        from weasyprint import HTML  # type: ignore
+        weasyprint = HTML
+    except Exception:
+        weasyprint = None
     for url in urls:
         if not _is_internal_allowed(url, allowed_prefix):
             continue
@@ -154,6 +160,12 @@ async def render_urls_to_pdf(urls: Iterable[str], output_root: str, allowed_pref
                 subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except Exception:
                 # Skip on failure
+                pass
+        elif weasyprint:
+            try:
+                # Render via WeasyPrint (may have CSS/JS limitations)
+                weasyprint(url).write_pdf(str(pdf_path))
+            except Exception:
                 pass
         # Record mapping whether or not rendering succeeded; file presence indicates success
         url_to_pdf[url] = str(pdf_path)
