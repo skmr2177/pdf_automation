@@ -1,7 +1,7 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Set
+from typing import Callable, Optional, Set, List
 
 from pathlib import Path
 from playwright.async_api import async_playwright, Browser
@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright, Browser
 from .cache import Cache
 from .render import render_page_to_pdf
 from .utils import compute_sha256, is_internal_url, normalize_url, url_to_pdf_path
+from urllib.parse import urlparse
 
 
 ALLOWED_HOST = "help.sketchup.com"
@@ -21,6 +22,7 @@ class CrawlConfig:
 	concurrency: int = 3
 	max_pages: Optional[int] = None
 	max_depth: int = 5
+	allowed_path_prefixes: Optional[List[str]] = None  # e.g., ["/en/"], if None defaults to ["/en/"]
 
 
 class Crawler:
@@ -28,6 +30,22 @@ class Crawler:
 		self.config = config
 		self.cache = Cache(config.db_path)
 		self.seen: Set[str] = set()
+		self.allowed_prefixes: List[str] = (
+			config.allowed_path_prefixes if config.allowed_path_prefixes else ["/en/"]
+		)
+
+	def _is_allowed(self, url: str) -> bool:
+		if not is_internal_url(url, ALLOWED_HOST):
+			return False
+		try:
+			p = urlparse(url).path or "/"
+			# Ensure trailing slash logic uses leading '/'
+			for pref in self.allowed_prefixes:
+				if p.startswith(pref):
+					return True
+			return False
+		except Exception:
+			return False
 
 	async def _worker(self, browser: Browser, queue: "asyncio.Queue[tuple[str, int]]") -> None:
 		while True:
@@ -46,7 +64,7 @@ class Crawler:
 					queue.task_done()
 					continue
 
-				if not is_internal_url(url, ALLOWED_HOST):
+				if not self._is_allowed(url):
 					queue.task_done()
 					continue
 
@@ -68,9 +86,9 @@ class Crawler:
 						last_crawled=int(time.time()),
 						status=200,
 					)
-					# Enqueue internal links
+					# Enqueue internal links limited to allowed path prefixes
 					for link in links:
-						if is_internal_url(link, ALLOWED_HOST):
+						if self._is_allowed(link):
 							await queue.put((normalize_url(link), depth + 1))
 					queue.task_done()
 			except Exception:
@@ -84,7 +102,8 @@ class Crawler:
 			browser = await p.chromium.launch()
 			queue: "asyncio.Queue[tuple[str, int]]" = asyncio.Queue()
 			for s in seeds:
-				await queue.put((s, 0))
+				if self._is_allowed(s):
+					await queue.put((s, 0))
 
 			workers = [asyncio.create_task(self._worker(browser, queue)) for _ in range(self.config.concurrency)]
 			await queue.join()
