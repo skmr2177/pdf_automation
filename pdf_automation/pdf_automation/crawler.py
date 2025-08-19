@@ -14,6 +14,15 @@ def _is_internal_allowed(url: str, allowed_prefix: str) -> bool:
     return url.startswith(allowed_prefix)
 
 
+def _is_same_host(url: str, allowed_prefix: str) -> bool:
+    """Return True if url shares the same host as allowed_prefix."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).netloc.lower() == urlparse(allowed_prefix).netloc.lower()
+    except Exception:
+        return False
+
+
 def _normalize_url(url: str) -> str:
     # Drop URL fragments and normalize trailing slashes
     base = url.split("#", 1)[0]
@@ -45,6 +54,12 @@ def _absolutize(href: str, base: str) -> str:
 
 
 def collect_internal_urls(seed_url: str, allowed_prefix: str, max_pages: int | None = None) -> Set[str]:
+    """Collect all pages that ultimately land under allowed_prefix, following redirects on the same host.
+
+    - Enqueue any link on the same host as allowed_prefix
+    - After fetching a URL, only mark as visited if the final URL (after redirects) starts with allowed_prefix
+    - Unlimited depth; optional max_pages cap
+    """
     seed_url = _normalize_url(seed_url)
     allowed_prefix = _normalize_url(allowed_prefix)
 
@@ -61,26 +76,32 @@ def collect_internal_urls(seed_url: str, allowed_prefix: str, max_pages: int | N
             break
         current = queue.popleft()
         current = _normalize_url(current)
-        if current in visited:
-            continue
-        if not _is_internal_allowed(current, allowed_prefix):
+        if not _is_same_host(current, allowed_prefix):
             continue
 
         try:
-            resp = requests.get(current, headers=headers, timeout=20)
+            resp = requests.get(current, headers=headers, timeout=20, allow_redirects=True)
             resp.raise_for_status()
+            final_url = _normalize_url(resp.url)
             html = resp.text
         except Exception:
             continue
 
-        visited.add(current)
+        # Only accept pages that end up under the allowed prefix
+        if not _is_internal_allowed(final_url, allowed_prefix):
+            continue
 
+        if final_url in visited:
+            continue
+        visited.add(final_url)
+
+        # Extract links relative to the final URL
         for href in _extract_links(html):
-            abs_url = _absolutize(href, current)
+            abs_url = _absolutize(href, final_url)
             abs_url = _normalize_url(abs_url)
             if not abs_url:
                 continue
-            if not _is_internal_allowed(abs_url, allowed_prefix):
+            if not _is_same_host(abs_url, allowed_prefix):
                 continue
             if abs_url not in visited:
                 queue.append(abs_url)
