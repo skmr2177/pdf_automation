@@ -46,11 +46,14 @@ def main() -> None:
         )
 
     os.makedirs(args.output_root, exist_ok=True)
+    print(f"Seed: {args.seed}")
+    print(f"Allowed prefix: {args.allowed_prefix}")
     urls = collect_internal_urls(
         seed_url=args.seed,
         allowed_prefix=args.allowed_prefix,
         max_pages=args.max_pages,
     )
+    print(f"Collected {len(urls)} URL(s) under allowed prefix.")
 
     url_to_pdf = asyncio.run(
         render_urls_to_pdf(
@@ -59,6 +62,8 @@ def main() -> None:
             allowed_prefix=args.allowed_prefix,
         )
     )
+    created = sum(1 for _u, p in url_to_pdf.items() if Path(p).exists())
+    print(f"Rendered {created} PDF(s) to {args.output_root}")
 
     # Merge into or create manifest
     manifest_path = Path(args.manifest)
@@ -71,6 +76,7 @@ def main() -> None:
             manifest = {}
     manifest.update(url_to_pdf)
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Manifest written: {manifest_path}")
 
 
 if __name__ == "__main__":
