@@ -10,7 +10,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Crawl help.sketchup.com and render pages to PDFs")
     parser.add_argument("--seeds", type=str, nargs="*", help="Seed URLs to start crawling from")
     parser.add_argument("--seeds-file", type=str, help="File containing seed URLs (one per line)", default=None)
-    parser.add_argument("--out", type=str, help="Output root directory", default="out")
+    parser.add_argument("--out", type=str, help="Output root directory", default="pdfs")
     parser.add_argument("--db", type=str, help="Path to cache database", default=".cache/crawl.sqlite3")
     parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--max-depth", type=int, default=3)
@@ -26,8 +26,8 @@ def load_seeds(args: argparse.Namespace) -> List[str]:
         if p.exists():
             seeds.extend([line.strip() for line in p.read_text().splitlines() if line.strip() and not line.strip().startswith("#")])
     if not seeds:
-        # A reasonable default seed
-        seeds = ["https://help.sketchup.com/"]
+        # Use /en as default seed per requirement
+        seeds = ["https://help.sketchup.com/en"]
     return seeds
 
 

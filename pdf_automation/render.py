@@ -5,7 +5,7 @@ from typing import Optional
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
 
-from .utils import clean_main_content, is_internal_url, make_relative_href, url_to_pdf_path
+from .utils import clean_main_content, is_internal_url, make_relative_href, url_to_pdf_path, extract_links
 
 
 PRINT_CSS = """
@@ -35,70 +35,73 @@ header, nav, footer, .toc, .cookie, .banner, .ads, .share, .breadcrumbs, .feedba
 
 
 async def inject_content_and_rewrite_links(page: Page, base_url: str, out_root: Path, current_pdf_path: Path) -> str:
-    full_html = await page.content()
-    cleaned_html = clean_main_content(full_html)
+	full_html = await page.content()
+	cleaned_html = clean_main_content(full_html)
 
-    soup = BeautifulSoup(cleaned_html, "lxml")
-    for a in soup.find_all("a", href=True):
-        href = a.get("href")
-        # Leave relative links for Playwright to resolve; we will rewrite by computing absolute and mapping to PDF
-        # Convert external links to plain text
-        from urllib.parse import urljoin, urlparse
-        abs_href = urljoin(base_url, href)
-        if urlparse(abs_href).netloc and urlparse(abs_href).netloc != "help.sketchup.com":
-            a.name = "span"
-            if "href" in a.attrs:
-                del a["href"]
-            continue
-        # Internal link: rewrite to target pdf relative path
-        if abs_href and (urlparse(abs_href).netloc == "help.sketchup.com"):
-            target_pdf = url_to_pdf_path(abs_href, out_root)
-            a["href"] = make_relative_href(current_pdf_path, target_pdf)
+	soup = BeautifulSoup(cleaned_html, "lxml")
+	for a in soup.find_all("a", href=True):
+		href = a.get("href")
+		# Leave relative links for Playwright to resolve; we will rewrite by computing absolute and mapping to PDF
+		# Convert external links to plain text
+		from urllib.parse import urljoin, urlparse
+		abs_href = urljoin(base_url, href)
+		if urlparse(abs_href).netloc and urlparse(abs_href).netloc != "help.sketchup.com":
+			a.name = "span"
+			if "href" in a.attrs:
+				del a["href"]
+			continue
+		# Internal link: rewrite to target pdf relative path
+		if abs_href and (urlparse(abs_href).netloc == "help.sketchup.com"):
+			target_pdf = url_to_pdf_path(abs_href, out_root)
+			a["href"] = make_relative_href(current_pdf_path, target_pdf)
 
-    html_str = str(soup)
-    await page.set_content(html_str, wait_until="load")
-    await page.add_style_tag(content=PRINT_CSS)
-    await page.emulate_media(media="print")
-    return html_str
+	html_str = str(soup)
+	await page.set_content(html_str, wait_until="load")
+	await page.add_style_tag(content=PRINT_CSS)
+	await page.emulate_media(media="print")
+	return html_str
 
 
-async def render_page_to_pdf(browser: Browser, url: str, pdf_path: Path, out_root: Path) -> str:
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    page = await browser.new_page()
+async def render_page_to_pdf(browser: Browser, url: str, pdf_path: Path, out_root: Path) -> tuple[str, list[str]]:
+	pdf_path.parent.mkdir(parents=True, exist_ok=True)
+	page = await browser.new_page()
 
-    # Block analytics to speed up
-    async def route_block(route):
-        req = route.request
-        if any(k in req.url for k in ["/analytics", "google-analytics", "gtag", "segment", "optimizely", "/collect?"]):
-            return await route.abort()
-        return await route.continue_()
+	# Block analytics to speed up
+	async def route_block(route):
+		req = route.request
+		if any(k in req.url for k in ["/analytics", "google-analytics", "gtag", "segment", "optimizely", "/collect?"]):
+			return await route.abort()
+		return await route.continue_()
 
-    await page.route("**/*", route_block)
-    await page.goto(url, wait_until="networkidle")
+	await page.route("**/*", route_block)
+	await page.goto(url, wait_until="networkidle")
 
-    cleaned_html = await inject_content_and_rewrite_links(page, url, out_root, pdf_path)
+	# Extract links for crawling BEFORE we rewrite anchors to local PDF paths
+	original_html = await page.content()
+	links_for_crawl = extract_links(original_html, url)
 
-    header_template = """
-      <style>section{font-size:10px;width:100%;padding:0 10px;color:#666;font-family:Arial, sans-serif}</style>
-      <section><span class="title"></span></section>
-    """
-    footer_template = """
-      <style>section{font-size:10px;width:100%;padding:0 10px;color:#666;font-family:Arial, sans-serif}</style>
-      <section>
-        <span class="url"></span>
-        <div style="float:right">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>
-      </section>
-    """
+	cleaned_html = await inject_content_and_rewrite_links(page, url, out_root, pdf_path)
 
-    await page.pdf(
-        path=str(pdf_path),
-        format="A4",
-        print_background=True,
-        margin={"top": "18mm", "right": "15mm", "bottom": "20mm", "left": "15mm"},
-        display_header_footer=True,
-        header_template=header_template,
-        footer_template=footer_template,
-    )
-    await page.close()
-    return cleaned_html
+	header_template = """
+	  <style>section{font-size:10px;width:100%;padding:0 10px;color:#666;font-family:Arial, sans-serif}</style>
+	  <section><span class="title"></span></section>
+	"""
+	footer_template = """
+	  <style>section{font-size:10px;width:100%;padding:0 10px;color:#666;font-family:Arial, sans-serif}</style>
+	  <section>
+		<span class="url"></span>
+		<div style="float:right">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>
+	  </section>
+	"""
 
+	await page.pdf(
+		path=str(pdf_path),
+		format="A4",
+		print_background=True,
+		margin={"top": "18mm", "right": "15mm", "bottom": "20mm", "left": "15mm"},
+		display_header_footer=True,
+		header_template=header_template,
+		footer_template=footer_template,
+	)
+	await page.close()
+	return cleaned_html, links_for_crawl
