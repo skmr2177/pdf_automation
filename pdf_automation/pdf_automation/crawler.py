@@ -53,6 +53,27 @@ def _absolutize(href: str, base: str) -> str:
         return base.rsplit("/", 1)[0] + "/" + href
 
 
+def _ensure_absolute_allowed_prefix(seed_url: str, allowed_prefix: str) -> str:
+    """Return an absolute allowed_prefix.
+
+    If allowed_prefix starts with '/', treat it as a path under the seed's origin.
+    """
+    try:
+        from urllib.parse import urlparse
+    except Exception:
+        return allowed_prefix
+    if not allowed_prefix:
+        return allowed_prefix
+    if allowed_prefix.startswith("http://") or allowed_prefix.startswith("https://"):
+        return allowed_prefix.rstrip("/")
+    if allowed_prefix.startswith("/"):
+        seed = urlparse(seed_url)
+        origin = f"{seed.scheme}://{seed.netloc}"
+        return (origin + allowed_prefix).rstrip("/")
+    # Fallback: assume it's already absolute-like
+    return allowed_prefix.rstrip("/")
+
+
 def collect_internal_urls(seed_url: str, allowed_prefix: str, max_pages: int | None = None) -> Set[str]:
     """Collect all pages that ultimately land under allowed_prefix, following redirects on the same host.
 
@@ -61,14 +82,23 @@ def collect_internal_urls(seed_url: str, allowed_prefix: str, max_pages: int | N
     - Unlimited depth; optional max_pages cap
     """
     seed_url = _normalize_url(seed_url)
+    # Normalize allowed_prefix: allow path-only inputs like "/en/3d-warehouse"
+    allowed_prefix = _ensure_absolute_allowed_prefix(seed_url, allowed_prefix)
     allowed_prefix = _normalize_url(allowed_prefix)
 
     visited: Set[str] = set()
     queue: deque[str] = deque([seed_url])
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        # Pretend to be a recent stable Chrome on Linux to avoid bot pages
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
 
     while queue:
@@ -80,7 +110,7 @@ def collect_internal_urls(seed_url: str, allowed_prefix: str, max_pages: int | N
             continue
 
         try:
-            resp = requests.get(current, headers=headers, timeout=20, allow_redirects=True)
+            resp = requests.get(current, headers=headers, timeout=30, allow_redirects=True)
             resp.raise_for_status()
             final_url = _normalize_url(resp.url)
             html = resp.text
@@ -139,6 +169,18 @@ async def render_urls_to_pdf(urls: Iterable[str], output_root: str, allowed_pref
         weasyprint = HTML
     except Exception:
         weasyprint = None
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
     for url in urls:
         if not _is_internal_allowed(url, allowed_prefix):
             continue
@@ -148,7 +190,69 @@ async def render_urls_to_pdf(urls: Iterable[str], output_root: str, allowed_pref
             safe_relative = "index"
         pdf_path = output_root_path / (safe_relative + ".pdf")
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
-        if chrome:
+
+        # Fetch HTML upfront to avoid anti-bot differences when printing
+        html: str | None = None
+        final_url = url
+        try:
+            r = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+            r.raise_for_status()
+            final_url = _normalize_url(r.url)
+            html = r.text
+        except Exception:
+            html = None
+
+        if chrome and html:
+            # Write a temporary local HTML with a <base> tag so relative paths resolve
+            tmp_html = pdf_path.with_suffix(".__tmp__.html")
+            try:
+                soup = BeautifulSoup(html, "html.parser")
+                head = soup.find("head")
+                if head is None:
+                    head = soup.new_tag("head")
+                    if soup.contents:
+                        soup.insert(0, head)
+                    else:
+                        soup.append(head)
+                # Prepend/replace base tag
+                base_tag = soup.new_tag("base", href=final_url)
+                # Put base first in head
+                head.insert(0, base_tag)
+                tmp_html.write_text(str(soup), encoding="utf-8")
+                cmd = [
+                    chrome,
+                    "--headless=new",
+                    "--disable-gpu",
+                    f"--print-to-pdf={pdf_path}",
+                    str(tmp_html),
+                ]
+                try:
+                    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                finally:
+                    try:
+                        tmp_html.unlink(missing_ok=True)  # type: ignore[call-arg]
+                    except Exception:
+                        pass
+            except Exception:
+                # Fall back to direct URL if local render fails
+                cmd = [
+                    chrome,
+                    "--headless=new",
+                    "--disable-gpu",
+                    f"--print-to-pdf={pdf_path}",
+                    url,
+                ]
+                try:
+                    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                except Exception:
+                    pass
+        elif weasyprint and html:
+            try:
+                weasyprint(string=html, base_url=final_url).write_pdf(str(pdf_path))  # type: ignore
+            except Exception:
+                pass
+        elif chrome:
+            # Last resort: print direct URL
             cmd = [
                 chrome,
                 "--headless=new",
@@ -159,14 +263,8 @@ async def render_urls_to_pdf(urls: Iterable[str], output_root: str, allowed_pref
             try:
                 subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except Exception:
-                # Skip on failure
                 pass
-        elif weasyprint:
-            try:
-                # Render via WeasyPrint (may have CSS/JS limitations)
-                weasyprint(url).write_pdf(str(pdf_path))
-            except Exception:
-                pass
+
         # Record mapping whether or not rendering succeeded; file presence indicates success
         url_to_pdf[url] = str(pdf_path)
     return url_to_pdf
