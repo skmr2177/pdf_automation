@@ -19,7 +19,18 @@ class SiteCrawler:
 		self.same_origin_only = same_origin_only
 		self.max_pages = max_pages
 		# If provided, restrict accepted pages to this prefix (after redirects)
-		self.allowed_prefix = None if allowed_prefix is None else normalize_url(allowed_prefix, "")
+		if allowed_prefix is None:
+			self.allowed_prefix = None
+		else:
+			# Support path-only prefixes like "/en/3d-warehouse" by resolving against the seed origin
+			from urllib.parse import urlparse
+			ap = allowed_prefix.strip()
+			if ap.startswith("/"):
+				seed = urlparse(self.start_url)
+				origin = f"{seed.scheme}://{seed.netloc}"
+				self.allowed_prefix = normalize_url(origin, ap)
+			else:
+				self.allowed_prefix = normalize_url(ap, "")
 
 	def _is_internal(self, base_url: str, target_url: str) -> bool:
 		if not self.same_origin_only:
@@ -41,6 +52,20 @@ class SiteCrawler:
 		# accept if normalized URL starts with the allowed prefix
 		return url.startswith(self.allowed_prefix)
 
+	def _looks_like_error_page(self, html: str) -> bool:
+		try:
+			soup = BeautifulSoup(html, "html.parser")
+			title = (soup.title.string or "").strip().lower() if soup.title else ""
+			h1 = (soup.find("h1").get_text(strip=True) or "").lower() if soup.find("h1") else ""
+			text = (title + " " + h1)
+			return (
+				"page not found" in text
+				or "access denied" in text
+				or "forbidden" in text
+			)
+		except Exception:
+			return False
+
 	def crawl(self) -> Tuple[Dict[str, str], Dict[str, str]]:
 		"""Return (url->html, url->pdf_relpath) for discovered pages."""
 		seen: Set[str] = set()
@@ -48,6 +73,14 @@ class SiteCrawler:
 		pdf_rel_by_url: Dict[str, str] = {}
 
 		queue: deque[str] = deque([self.start_url])
+		headers = {
+			"User-Agent": (
+				"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+				"Chrome/124.0.0.0 Safari/537.36"
+			),
+			"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+			"Accept-Language": "en-US,en;q=0.9",
+		}
 		while queue:
 			url = queue.popleft()
 			if url in seen:
@@ -56,7 +89,7 @@ class SiteCrawler:
 				break
 
 			try:
-				resp = requests.get(url, timeout=20, allow_redirects=True)
+				resp = requests.get(url, timeout=30, allow_redirects=True, headers=headers)
 				resp.raise_for_status()
 				final_url = normalize_url(resp.url, "")
 				html = resp.text
@@ -66,6 +99,10 @@ class SiteCrawler:
 			# Only accept/record pages that match the allowed prefix (if provided)
 			if not self._is_allowed(final_url):
 				# Do not mark as seen; skip extracting links from out-of-scope pages
+				continue
+
+			# Skip obvious error pages to avoid writing empty PDFs
+			if self._looks_like_error_page(html):
 				continue
 
 			seen.add(final_url)

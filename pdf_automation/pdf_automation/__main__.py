@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from .crawler import collect_internal_urls, render_urls_to_pdf
+from .crawler import collect_internal_urls, render_urls_to_pdf, _ensure_absolute_allowed_prefix
 
 
 def main() -> None:
@@ -40,6 +40,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Normalize allowed_prefix to absolute if a path-only value was provided
+    args.allowed_prefix = _ensure_absolute_allowed_prefix(args.seed, args.allowed_prefix)
     if not args.seed.startswith(args.allowed_prefix):
         raise SystemExit(
             f"Seed URL must be under allowed prefix. Got seed={args.seed} allowed_prefix={args.allowed_prefix}"
