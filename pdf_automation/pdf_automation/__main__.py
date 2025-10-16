@@ -6,6 +6,8 @@ from pathlib import Path
 
 from .crawler import collect_internal_urls, render_urls_to_pdf
 
+# Optional: allow selecting Playwright backend via flag
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Crawl help.sketchup.com/en subtree and export pages to PDF.")
@@ -37,6 +39,15 @@ def main() -> None:
         default=None,
         help="Optional safety cap to limit number of pages crawled while testing.",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["chrome", "playwright"],
+        default="chrome",
+        help="Rendering engine: built-in Chrome CLI or Playwright",
+    )
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument("--timeout-ms", type=int, default=90_000)
 
     args = parser.parse_args()
 
@@ -55,13 +66,26 @@ def main() -> None:
     )
     print(f"Collected {len(urls)} URL(s) under allowed prefix.")
 
-    url_to_pdf = asyncio.run(
-        render_urls_to_pdf(
-            urls=sorted(urls),
-            output_root=args.output_root,
-            allowed_prefix=args.allowed_prefix,
+    if args.engine == "playwright":
+        from .playwright_main import render_urls_to_pdf_playwright
+        url_to_pdf = asyncio.run(
+            render_urls_to_pdf_playwright(
+                urls=sorted(urls),
+                output_root=args.output_root,
+                allowed_prefix=args.allowed_prefix,
+                concurrency=args.concurrency,
+                retries=args.retries,
+                timeout_ms=args.timeout_ms,
+            )
         )
-    )
+    else:
+        url_to_pdf = asyncio.run(
+            render_urls_to_pdf(
+                urls=sorted(urls),
+                output_root=args.output_root,
+                allowed_prefix=args.allowed_prefix,
+            )
+        )
     created = sum(1 for _u, p in url_to_pdf.items() if Path(p).exists())
     print(f"Rendered {created} PDF(s) to {args.output_root}")
 
